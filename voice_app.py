@@ -99,20 +99,19 @@ SPEAKER_LINE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z .'\-]{0,24}?)\s*:\s*(.*)$")
 
 
 def format_voice_name(voice):
-    """Turn a raw voice dict into a clean 'Name (Place)' label for display."""
+    """Turn a raw voice dict into a clean 'Place - Name' label for display."""
     short_name = voice.get("ShortName", "")
     friendly = voice.get("FriendlyName", "")
 
     # Name: take the part of ShortName after the locale, strip the Neural suffix,
-    # and split CamelCase into separate words (AriaNeural -> Aria, JennyMultilingualNeural -> Jenny Multilingual).
+    # and split CamelCase into separate words (AriaNeural -> Aria).
     name_part = short_name.split("-")[-1]
     name_part = re.sub(r"Neural$", "", name_part)
     name_part = re.sub(r"(?<!^)(?=[A-Z])", " ", name_part).strip()
     if not name_part:
         name_part = short_name
 
-    # Place: pull the last "(...)" group out of FriendlyName, e.g.
-    # "Microsoft Aria Online (Natural) - English (United States)" -> "United States".
+    # Place: pull the last "(...)" group out of FriendlyName.
     place = ""
     matches = re.findall(r"\(([^)]+)\)", friendly)
     if matches:
@@ -121,7 +120,8 @@ def format_voice_name(voice):
         locale = voice.get("Locale", "")
         place = locale.split("-")[-1] if locale else ""
 
-    return f"{name_part} ({place})" if place else name_part
+    # CHANGED: Now formats as "Country - Name" to sort alphabetically by country
+    return f"{place} - {name_part}" if place else name_part
 
 
 def build_voice_maps(voices):
@@ -584,8 +584,13 @@ class SingleVoiceApp:
         async def run():
             try:
                 chunks = chunk_text(text, max_len=3000)
+                total_chunks = len(chunks)
+
+                # CHANGED: Launch progress bar popup
+                self.root.after(0, lambda: self.show_progress_popup(total_chunks))
+
                 with open(output_path, "wb") as out_file:
-                    for chunk in chunks:
+                    for i, chunk in enumerate(chunks):
                         rate = f"{speed * 100 - 100:+.0f}%"
                         pitch_str = f"{(pitch - 1) * 50:+.0f}Hz"
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
@@ -599,13 +604,49 @@ class SingleVoiceApp:
 
                         os.remove(tmp_path)
 
+                        # CHANGED: Update progress bar value
+                        self.root.after(0, lambda val=i + 1: self.update_progress(val, total_chunks))
+
                 save_recent_export(output_path)
-                messagebox.showinfo("Success", f"Saved to {output_path}")
+                self.root.after(0, lambda: messagebox.showinfo("Success", f"Saved to {output_path}"))
 
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to save MP3:\n{e}")
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to save MP3:\n{e}"))
+            finally:
+                # CHANGED: Safely close popup
+                self.root.after(0, self.close_progress_popup)
 
         threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()
+
+    def show_progress_popup(self, total):
+        self.progress_popup = ctk.CTkToplevel(self.root)
+        self.progress_popup.title("Saving Audio")
+        self.progress_popup.geometry("350x120")
+        self.progress_popup.resizable(False, False)
+        self.progress_popup.transient(self.root)
+        self.progress_popup.grab_set()
+
+        ctk.CTkLabel(self.progress_popup, text="Saving audio, please wait...", font=("Segoe UI", 12)).pack(pady=(15, 5))
+
+        self.progress_bar = ctk.CTkProgressBar(self.progress_popup, width=300)
+        self.progress_bar.set(0)
+        self.progress_bar.pack(pady=5)
+
+        # CHANGED: Added width=50 to prevent the '1' from getting clipped off the edge
+        self.percent_label = ctk.CTkLabel(self.progress_popup, text="0%", font=("Segoe UI", 11), width=50)
+        self.percent_label.pack()
+
+    def update_progress(self, value, total):
+        # CHANGED: Added min/max clamping just to ensure math stays clean
+        progress = min(1.0, max(0.0, value / total))
+        self.progress_bar.set(progress)
+        self.percent_label.configure(text=f"{int(progress * 100)}%")
+
+    def close_progress_popup(self):
+        if hasattr(self, 'progress_popup') and self.progress_popup:
+            self.progress_popup.grab_release()
+            self.progress_popup.destroy()
+            self.progress_popup = None
 
     def back_to_home(self):
         for widget in self.root.winfo_children():
@@ -778,7 +819,7 @@ class MultiVoiceApp:
             return
 
         remove_names = self.remove_names_var.get()
-        segments = []          # (speaker_name, text_to_speak)
+        segments = []
         current_name = None
         current_lines = []
 
@@ -794,13 +835,11 @@ class MultiVoiceApp:
             if not line:
                 continue
 
-            # Only treat "Name:" as a new speaker when it matches a real name pattern
-            # (short, alphabetic) — avoids false splits on things like "10:30" or a
-            # sentence that just happens to contain a colon.
+            # Standardize names to Title Case so "alice" and "Alice" don't count as two people
             match = SPEAKER_LINE_RE.match(line)
             if match:
                 flush()
-                current_name = match.group(1).strip()
+                current_name = match.group(1).strip().title()
                 rest = match.group(2).strip()
                 current_lines = [rest] if rest else []
             else:
@@ -814,20 +853,26 @@ class MultiVoiceApp:
             messagebox.showinfo("No Names Found", "No name-based lines were found.")
             return
 
-        # Assign each unique speaker a voice, round-robin across the Voices-to-Use list
-        unique_names = []
-        for name, _ in segments:
-            if name not in unique_names:
-                unique_names.append(name)
-        name_to_voice = {name: voices_list[i % len(voices_list)] for i, name in enumerate(unique_names)}
+        # CHANGED: Persistent memory map. This forces characters to keep
+        # their assigned voice for the entire session, ending random swapping!
+        if not hasattr(self, 'character_voice_map'):
+            self.character_voice_map = {}
 
+        for name, _ in segments:
+            if name not in self.character_voice_map:
+                # Assign the next available voice in the user's selected list
+                assigned_voice = voices_list[len(self.character_voice_map) % len(voices_list)]
+                self.character_voice_map[name] = assigned_voice
+
+        # Clear existing rows
         for row in self.voice_rows[:]:
             self.remove_row(row[4])
 
+        # Add new rows (Ensuring this loop only exists once fixes the doubling bug)
         for name, sentence in segments:
             self.add_sentence(preload_text=sentence)
             t, v, s, p, _ = self.voice_rows[-1]
-            v.set(name_to_voice[name])
+            v.set(self.character_voice_map[name])
 
     def add_sentence(self, preload_text=""):
         row_frame = ctk.CTkFrame(self.inner_frame)
