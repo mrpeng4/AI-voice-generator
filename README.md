@@ -1,5 +1,7 @@
 # 🎙 AI Voice Generator
 
+I know I used a lot of emojis because I wanted it to be understandable and user-friendly and you may this is a app made by ai so yes it has been vibe coded for the basics in 2024 for 1 month then later finished in 2025 after 2 months of manual development and added a new ui in a week and a new tutorial for starters. for stardust program. hope you like it and yea I din't change the name of the app and kept it simple so it is clear what it is. :) by Pillu
+
 A desktop app for turning text into natural-sounding speech using Microsoft Edge's
 online neural voices (via `edge-tts`). Generate a single voice-over, or build a
 multi-character script with a different voice, speed, and pitch per line.
